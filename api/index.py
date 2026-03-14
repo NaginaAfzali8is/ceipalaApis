@@ -21,34 +21,36 @@ supabase: Client = create_client(url, key)
 @app.get("/api/match-candidates")
 async def match_candidates(job_req: str):
     try:
-        # Step 1: Greedy Search (Ensures zero skips)
-        # If input is "Senior QA Engineer", we focus on "QA Engineer" for the database query
-        core_role = job_req.lower().replace("senior", "").replace("junior", "").strip()
+        # 1. Clean the input (remove parentheses and extra spaces)
+        clean_query = job_req.replace('(', '').replace(')', '').strip()
         
-        response = supabase.table("parsed_resumes").select("*").or_(
-            f"data->>job_title.ilike.%{core_role}%,data->>resume_text.ilike.%{core_role}%"
-        ).limit(50).execute()
+        # 2. Split into keywords to match your SQL logic
+        keywords = clean_query.split()
+        
+        # 3. Build a filter string for Supabase
+        # This mimics your 'EXISTS (unnest(string_to_array...))' logic
+        filter_parts = []
+        for word in keywords:
+            if len(word) > 2: # Ignore small words like 'at', 'in'
+                filter_parts.append(f"data->>job_title.ilike.%{word}%")
+                filter_parts.append(f"data->>resume_text.ilike.%{word}%")
+        
+        filter_string = ",".join(filter_parts)
 
-        all_matches = response.data
-        
-        # Step 2: Smart Filter for "Senior" (CEO Requirement)
-        is_senior_req = "senior" in job_req.lower() or "lead" in job_req.lower()
-        
-        final_list = []
-        for cand in all_matches:
-            text_to_check = str(cand['data']).lower()
-            
-            # If we need a senior, we look for senior keywords
-            if is_senior_req:
-                senior_keywords = ["senior", "lead", "sr.", "principal", "years exp"]
-                if any(word in text_to_check for word in senior_keywords):
-                    final_list.append(cand)
-            else:
-                final_list.append(cand)
+        # 4. Execute the query using .or_() for keyword matching
+        response = supabase.table("parsed_resumes") \
+            .select("id, data->full_name, data->job_title") \
+            .or_(filter_string) \
+            .limit(10) \
+            .execute()
 
-        return {"total": len(final_list), "candidates": final_list}
+        return {
+            "total": len(response.data),
+            "candidates": response.data
+        }
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"error": str(e), "candidates": []}
+
 
 # NEW: Fetch Candidates by Array of IDs
 @app.get("/api/fetch-by-ids")
