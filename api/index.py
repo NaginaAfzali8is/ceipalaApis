@@ -21,10 +21,12 @@ supabase: Client = create_client(url, key)
 
 from datetime import datetime, timedelta
 
+from datetime import datetime, timedelta
+
 @app.get("/api/match-candidates")
 async def match_candidates(job_req: str):
     try:
-        # 1. Freshness Filter: Calculate date 3 months ago
+        # 1. Date Logic
         three_months_ago = (datetime.now() - timedelta(days=90)).isoformat()
 
         clean_query = job_req.replace('(', '').replace(')', '').lower().strip()
@@ -33,37 +35,39 @@ async def match_candidates(job_req: str):
         
         filter_parts = [f"data->>job_title.ilike.%{t}%" for t in search_terms] + \
                        [f"data->>resume_text.ilike.%{t}%" for t in search_terms]
-        
-        # 2. Query with Date Filter (Assuming created_at column exists)
-        response = supabase.table("parsed_resumes").select("*") \
-            .or_(",".join(filter_parts)) \
-            .gte("created_at", three_months_ago) \
-            .limit(50).execute()
+
+        # 2. THE JOIN QUERY
+        # We select from parsed_resumes and "inner join" ceipal_applicant_details
+        # We use !inner to force the date filter to apply
+        response = supabase.table("parsed_resumes").select(
+            "id, data, ceipal_applicant_details!inner(created_at)"
+        ).or_(
+            ",".join(filter_parts)
+        ).gte(
+            "ceipal_applicant_details.created_at", three_months_ago
+        ).limit(50).execute()
         
         all_matches = response.data
         tdm_keywords = ["masking", "synthetic", "subsetting", "tdm", "provisioning", "etl", "qa automation"]
         
         final_list = []
         for cand in all_matches:
-            # We keep the Full Data here in the loop for our filtering logic...
             data = cand.get('data', {})
             text = str(data).lower()
             
-            # ...but we only return a "Thin" object to the AI
             if "test data" in clean_query and not any(k in text for k in tdm_keywords):
                 continue
             
-            # ONLY return what the AI needs to SCORE
-            # We keep the 'id' so you can look up the name/email LATER in the workflow
             final_list.append({
                 "id": cand.get("id"),
                 "job_title": data.get("job_title"),
-                "resume_summary": data.get("resume_text", "")[:2000] # AI only needs the top part
+                "resume_summary": data.get("resume_text", "")[:3000] # Increased to 3k for safety
             })
 
         return {"total": len(final_list), "candidates": final_list}
 
     except Exception as e:
+        # This will help you see the exact SQL error if the join fails
         return {"error": str(e), "total": 0, "candidates": []}
         
 
