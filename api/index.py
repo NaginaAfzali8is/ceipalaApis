@@ -22,53 +22,45 @@ supabase: Client = create_client(url, key)
 @app.get("/api/match-candidates")
 async def match_candidates(job_req: str):
     try:
-        # 1. CLEANING: Remove parentheses and special characters
-        clean_query = job_req.replace('(', '').replace(')', '').strip()
+        # 1. Clean and Lowercase
+        clean_query = job_req.replace('(', '').replace(')', '').lower().strip()
+        words = [w for w in clean_query.split() if len(w) > 2 and w not in ["senior", "junior", "lead"]]
         
-        # 2. KEYWORD LOGIC: Split words to ensure we don't return 0 results
-        # This handles "Test Data Engineer (TDM)" by looking for each word
-        keywords = clean_query.lower().replace("senior", "").replace("junior", "").split()
+        # 2. Generate Pairs (Bigrams)
+        # If words are [Test, Data, Engineer], pairs are ["Test Data", "Data Engineer"]
+        pairs = [" ".join(words[i:i+2]) for i in range(len(words)-1)]
         
+        # If it's only one word, just use that word
+        search_terms = pairs if pairs else words
+        
+        # 3. Build the OR filter for Supabase
         filter_parts = []
-        for word in keywords:
-            if len(word) > 2:
-                filter_parts.append(f"data->>job_title.ilike.%{word}%")
-                filter_parts.append(f"data->>resume_text.ilike.%{word}%")
+        for term in search_terms:
+            filter_parts.append(f"data->>job_title.ilike.%{term}%")
+            filter_parts.append(f"data->>resume_text.ilike.%{term}%")
         
         filter_string = ",".join(filter_parts)
 
-        # 3. GREEDY FETCH: Use select("*") to get all data like your old code
-        response = supabase.table("parsed_resumes") \
-            .select("*") \
-            .or_(filter_string) \
-            .limit(50) \
-            .execute()
-
+        # 4. Fetch from Supabase
+        response = supabase.table("parsed_resumes").select("*").or_(filter_string).limit(50).execute()
         all_matches = response.data
 
-        # 4. SMART FILTER: Apply your CEO's Senior/Lead requirement
+        # 5. Senior/Lead Filter (Keep your original logic)
         is_senior_req = "senior" in job_req.lower() or "lead" in job_req.lower()
         final_list = []
-        
         for cand in all_matches:
-            # Check the whole data object for senior keywords if required
             text_to_check = str(cand.get('data', '')).lower()
-            
             if is_senior_req:
-                senior_keywords = ["senior", "lead", "sr.", "principal", "years exp"]
-                if any(word in text_to_check for word in senior_keywords):
+                if any(word in text_to_check for word in ["senior", "lead", "sr.", "principal"]):
                     final_list.append(cand)
             else:
-                # If not a senior req, include everyone found in the greedy search
                 final_list.append(cand)
 
-        return {
-            "total": len(final_list), 
-            "candidates": final_list
-        }
+        return {"total": len(final_list), "candidates": final_list}
 
     except Exception as e:
-        return {"error": str(e), "total": 0, "candidates": []}
+        return {"error": str(e), "candidates": []}
+
 
 
 # NEW: Fetch Candidates by Array of IDs
