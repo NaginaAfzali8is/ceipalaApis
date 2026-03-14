@@ -61,7 +61,7 @@ async def match_candidates(job_req: str):
             final_list.append({
                 "id": cand.get("id"),
                 "job_title": data.get("job_title"),
-                "candidate_id": data.get("candidate_id"),
+                "candidate_id": cand.get("candidate_id"),
                 "resume_summary": data.get("resume_text", "")[:3000] # Increased to 3k for safety
             })
 
