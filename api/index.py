@@ -65,7 +65,11 @@ async def match_candidates(job_req: str):
                 "resume_summary": data.get("resume_text", "")[:3000] # Increased to 3k for safety
             })
 
-        return {"total": len(final_list), "candidates": final_list}
+      # SLICE THE LIST HERE: Change 15 to 10 if you want even fewer
+        limited_list = final_list[:15]
+
+        return {"total": len(limited_list), "candidates": limited_list}
+       # // return {"total": len(final_list), "candidates": final_list}
 
     except Exception as e:
         # This will help you see the exact SQL error if the join fails
