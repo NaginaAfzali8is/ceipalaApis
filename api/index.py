@@ -22,42 +22,54 @@ supabase: Client = create_client(url, key)
 @app.get("/api/match-candidates")
 async def match_candidates(job_req: str):
     try:
-        # Step 1: Greedy Search (Ensures zero skips)
-        # FIX: We remove parentheses here because they break the .ilike query in the API
-        clean_req = job_req.replace("(", "").replace(")", "")
+        # 1. CLEANING: Remove parentheses and special characters
+        clean_query = job_req.replace('(', '').replace(')', '').strip()
         
-        core_role = clean_req.lower().replace("senior", "").replace("junior", "").strip()
+        # 2. KEYWORD LOGIC: Split words to ensure we don't return 0 results
+        # This handles "Test Data Engineer (TDM)" by looking for each word
+        keywords = clean_query.lower().replace("senior", "").replace("junior", "").split()
+        
+        filter_parts = []
+        for word in keywords:
+            if len(word) > 2:
+                filter_parts.append(f"data->>job_title.ilike.%{word}%")
+                filter_parts.append(f"data->>resume_text.ilike.%{word}%")
+        
+        filter_string = ",".join(filter_parts)
 
-        # We query using the cleaned role
-        response = supabase.table("parsed_resumes").select("*").or_(
-            f"data->>job_title.ilike.%{core_role}%,data->>resume_text.ilike.%{core_role}%"
-        ).limit(50).execute()
+        # 3. GREEDY FETCH: Use select("*") to get all data like your old code
+        response = supabase.table("parsed_resumes") \
+            .select("*") \
+            .or_(filter_string) \
+            .limit(50) \
+            .execute()
 
         all_matches = response.data
 
-        # Step 2: Smart Filter for "Senior" (CEO Requirement)
+        # 4. SMART FILTER: Apply your CEO's Senior/Lead requirement
         is_senior_req = "senior" in job_req.lower() or "lead" in job_req.lower()
-
         final_list = []
+        
         for cand in all_matches:
-            # Safely get the data dictionary
-            candidate_data = cand.get('data', {})
-            text_to_check = str(candidate_data).lower()
+            # Check the whole data object for senior keywords if required
+            text_to_check = str(cand.get('data', '')).lower()
             
-            # If we need a senior, we look for senior keywords
             if is_senior_req:
                 senior_keywords = ["senior", "lead", "sr.", "principal", "years exp"]
                 if any(word in text_to_check for word in senior_keywords):
                     final_list.append(cand)
             else:
+                # If not a senior req, include everyone found in the greedy search
                 final_list.append(cand)
 
-        return {"total": len(final_list), "candidates": final_list}
+        return {
+            "total": len(final_list), 
+            "candidates": final_list
+        }
 
     except Exception as e:
-        # Using print here helps you see the error in Vercel Logs
-        print(f"Error: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+        return {"error": str(e), "total": 0, "candidates": []}
+
 
 # NEW: Fetch Candidates by Array of IDs
 @app.get("/api/fetch-by-ids")
