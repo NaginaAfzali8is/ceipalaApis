@@ -40,7 +40,7 @@ async def match_candidates(job_req: str):
         # We select from parsed_resumes and "inner join" ceipal_applicant_details
         # We use !inner to force the date filter to apply
         response = supabase.table("parsed_resumes").select(
-            "id, data, ceipal_applicant_details!inner(created_at)"
+            "id, data, candidate_id, ceipal_applicant_details!inner(created_at)"
         ).or_(
             ",".join(filter_parts)
         ).gte(
