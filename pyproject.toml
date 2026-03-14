@@ -1,0 +1,9 @@
+[project]
+name = "ceipala-apis"
+version = "0.1.0"
+dependencies = [
+    "fastapi",
+    "supabase",
+    "python-dotenv",
+    "uvicorn"
+]
