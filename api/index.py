@@ -22,34 +22,33 @@ supabase: Client = create_client(url, key)
 @app.get("/api/match-candidates")
 async def match_candidates(job_req: str):
     try:
+        # 1. Clean Input
         clean_query = job_req.replace('(', '').replace(')', '').lower().strip()
         words = [w for w in clean_query.split() if len(w) > 2 and w not in ["senior", "junior", "lead"]]
-        pairs = [" ".join(words[i:i+2]) for i in range(len(words)-1)]
-        search_terms = pairs if pairs else words
         
+        # 2. Generate Pairs (e.g., "Test Data", "Data Engineer")
+        search_terms = [" ".join(words[i:i+2]) for i in range(len(words)-1)] if len(words) > 1 else words
+        
+        # 3. Database Query
         filter_parts = [f"data->>job_title.ilike.%{t}%" for t in search_terms] + \
                        [f"data->>resume_text.ilike.%{t}%" for t in search_terms]
         
         response = supabase.table("parsed_resumes").select("*").or_(",".join(filter_parts)).limit(50).execute()
-        all_matches = response.data
-
-        # NEW: High-Precision TDM Keywords
-        # If the job is "Test Data", we look for these specific industry terms
-        tdm_identifiers = ["masking", "synthetic", "subsetting", "tdm", "provisioning", "etl", "qa automation"]
+        
+        # 4. High-Precision Filtering
+        tdm_keywords = ["masking", "synthetic", "subsetting", "tdm", "provisioning", "etl", "qa automation"]
+        is_senior_req = any(w in job_req.lower() for w in ["senior", "lead", "sr.", "principal"])
         
         final_list = []
-        for cand in all_matches:
+        for cand in response.data:
             text = str(cand.get('data', '')).lower()
             
-            # Smart Logic: If it's a TDM job, check for TDM tools/tasks
-            is_tdm_job = "test data" in clean_query
-            has_tdm_context = any(word in text for word in tdm_identifiers)
+            # Strict TDM Check: Only if searching for "Test Data"
+            if "test data" in clean_query:
+                if not any(k in text for k in tdm_keywords):
+                    continue # Skip generalists like Vraj
             
-            if is_tdm_job and not has_tdm_context:
-                continue # Skip Data Analysts like Vraj who don't do TDM tasks
-                
-            # Keep your original Senior Filter
-            is_senior_req = "senior" in job_req.lower() or "lead" in job_req.lower()
+            # Seniority Check
             if is_senior_req:
                 if any(w in text for w in ["senior", "lead", "sr.", "principal"]):
                     final_list.append(cand)
@@ -58,6 +57,8 @@ async def match_candidates(job_req: str):
 
         return {"total": len(final_list), "candidates": final_list}
 
+    except Exception as e:
+        return {"error": str(e), "total": 0, "candidates": []}
 
 
 # NEW: Fetch Candidates by Array of IDs
