@@ -62,6 +62,7 @@ async def match_candidates(job_req: str):
                 "id": cand.get("id"),
                 "job_title": data.get("job_title"),
                 "candidate_id": cand.get("candidate_id"),
+                        "resume_url": data.get("resume_url")  # ✅ added here
                 "resume_summary": data.get("resume_text", "")[:3000] # Increased to 3k for safety
             })
 
