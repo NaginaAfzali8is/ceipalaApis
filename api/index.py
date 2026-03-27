@@ -4,7 +4,11 @@ from typing import List
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime, timedelta        
+from pydantic import BaseModel
+from typing import List
 
+class JobRequest(BaseModel):
+    job_req: List[str]
 # This line MUST be here to read your .env file
 load_dotenv()
 
@@ -77,7 +81,8 @@ async def match_candidates(job_req: str):
 
 
 @app.get("/api/matchCandidates")
-async def match_candidates(job_req: List[str] = Query(...)):
+async def match_candidates(body: JobRequest):
+    job_req = body.job_req 
     try:
         # 1. Date Logic
         three_months_ago = (datetime.now() - timedelta(days=90)).isoformat()
