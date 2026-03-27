@@ -80,7 +80,7 @@ async def match_candidates(job_req: str):
         return {"error": str(e), "total": 0, "candidates": []}
 
 
-@app.get("/api/matchCandidates")
+@app.post("/api/matchCandidates")
 async def match_candidates(body: JobRequest):
     job_req = body.job_req 
     try:
