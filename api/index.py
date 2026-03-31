@@ -124,7 +124,7 @@ async def match_candidates(body: JobRequest):
             ",".join(filter_parts)
         ).gte(
             "ceipal_applicant_details.created_at", three_months_ago
-        ).limit(200).execute()
+        ).limit(100).execute()
 
         all_matches = response.data
 
