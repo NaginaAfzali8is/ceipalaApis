@@ -90,7 +90,8 @@ async def match_candidates(body: JobRequest):
         # 2. Normalize keywords
         keywords = []
         for kw in job_req:
-            clean = kw.replace('(', '').replace(')', '').lower().strip()
+            # Adding .replace(',', '') here is the first line of defense
+            clean = kw.replace('(', '').replace(')', '').replace(',', '').lower().strip()
             if clean:
                 keywords.append(clean)
 
@@ -110,8 +111,11 @@ async def match_candidates(body: JobRequest):
         # 4. Build OR filters
         filter_parts = []
         for term in search_terms:
-            filter_parts.append(f"data->>job_title.ilike.%{term}%")
-            filter_parts.append(f"data->>resume_text.ilike.%{term}%")
+            # Safety check: replace any remaining commas just in case
+            clean_term = term.replace(',', '').strip()
+            if clean_term:
+                filter_parts.append(f"data->>job_title.ilike.%{clean_term}%")
+                filter_parts.append(f"data->>resume_text.ilike.%{clean_term}%")
 
         # 5. Query Supabase
         response = supabase.table("parsed_resumes").select(
