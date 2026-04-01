@@ -166,6 +166,7 @@ async def match_candidates(body: JobRequest):
 import re
 from datetime import datetime, timedelta
 from motor.motor_asyncio import AsyncIOMotorClient
+from bson import ObjectId
 
 # MongoDB Setup
 MONGO_URI = os.getenv("MONGO_URI") # Update if using Atlas
@@ -173,70 +174,76 @@ client = AsyncIOMotorClient(MONGO_URI)
 db = client["recruitment_db"]
 resume_col = db["parsed_resumes"]
 
+
 @app.post("/api/matchCandidatesLocationBased")
 async def match_candidates_location_based(body: JobRequest):
-    job_req = body.job_req 
+    # Extract values safely
+    job_req = body.job_req or []
     target_city = body.target_city
     target_state = body.target_state
     target_country = body.target_country
 
     try:
-        three_months_ago = datetime.utcnow() - timedelta(days=90)
+        # 1. Date Logic
+        # Important: Use .isoformat() only if you stored dates as strings.
+        # If you stored them as proper Dates in Mongo, remove .isoformat()
+        three_months_ago = (datetime.utcnow() - timedelta(days=90)).isoformat()
 
-        # 1. Prepare search keywords
+        # 2. Normalize keywords
         keywords = []
         for kw in job_req:
             clean = re.sub(r'[(),]', '', kw).lower().strip()
             if clean:
                 keywords.append(clean)
 
-        # 2. Build the MongoDB Filter
+        # 3. Build MongoDB Filter
         mongo_filter = {}
 
-        # --- LOCATION FILTERS (Direct Fields) ---
-        # We use regex for a 'contains' search similar to ILIKE
-        if target_city:
-            mongo_filter["location"] = {"$regex": target_city, "$options": "i"}
+        # --- LOCATION FILTER ---
+        # Search in the 'location' field if city is provided
+        if target_city and target_city.strip():
+            mongo_filter["location"] = {"$regex": target_city.strip(), "$options": "i"}
         
         # --- DATE FILTER ---
-        mongo_filter["created_at"] = {"$gte": three_months_ago.isoformat()}
+        mongo_filter["created_at"] = {"$gte": three_months_ago}
 
-        # --- KEYWORD SEARCH (Direct Fields) ---
+        # --- KEYWORD SEARCH ---
         if keywords:
-            # Combining keywords into a regex pattern: "java|python|backend"
             regex_pattern = "|".join(keywords[:10])
-            
             mongo_filter["$or"] = [
                 {"job_title": {"$regex": regex_pattern, "$options": "i"}},
                 {"resume_text": {"$regex": regex_pattern, "$options": "i"}},
                 {"full_name": {"$regex": regex_pattern, "$options": "i"}}
             ]
 
-        # 3. Execute Query
+        # 4. Execute Query
+        # Wrap in a list to avoid cursor timeout
         cursor = resume_col.find(mongo_filter).sort("created_at", -1).limit(100)
         matches = await cursor.to_list(length=100)
 
-        # 4. TDM Keyword Logic & Formatting
+        # 5. Process Results with Null-Safety
         tdm_keywords = ["masking", "synthetic", "subsetting", "tdm", "provisioning", "etl", "qa automation"]
         final_list = []
 
         for cand in matches:
-            # Extract text for TDM check
-            combined_text = f"{cand.get('job_title', '')} {cand.get('resume_text', '')}".lower()
+            # Safety: Use empty strings if fields are missing to avoid NoneType errors
+            j_title = cand.get('job_title') or ""
+            r_text = cand.get('resume_text') or ""
+            combined_text = f"{j_title} {r_text}".lower()
 
+            # TDM Logic
             if any("test data" in kw for kw in keywords):
                 if not any(k in combined_text for k in tdm_keywords):
                     continue
 
             final_list.append({
                 "id": str(cand.get("_id")),
-                "job_title": cand.get("job_title"),
-                "candidate_id": str(cand.get("candidate_id")),
+                "job_title": j_title,
+                "candidate_id": str(cand.get("candidate_id")), # Convert ObjectId to string
                 "resume_url": cand.get("resume_url"),
                 "location": cand.get("location"),
                 "full_name": cand.get("full_name"),
-                # Summary for preview
-                "resume_summary": cand.get("resume_text", "")[:3000]
+                "resume_summary": r_text[:3000]
             })
 
         return {
@@ -245,8 +252,9 @@ async def match_candidates_location_based(body: JobRequest):
         }
 
     except Exception as e:
+        # This will now return the ACTUAL error to n8n instead of a generic 500
+        print(f"CRITICAL ERROR: {str(e)}")
         return {"error": str(e), "total": 0, "candidates": []}
-
 # NEW: Fetch Candidates by Array of IDs
 @app.get("/api/fetch-by-ids")
 async def fetch_by_ids(ids: str = Query(...)):
