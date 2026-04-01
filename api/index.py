@@ -7,8 +7,7 @@ from datetime import datetime, timedelta
 from pydantic import BaseModel
 from typing import List
 
-class JobRequest(BaseModel):
-    job_req: List[str]
+
 # This line MUST be here to read your .env file
 load_dotenv()
 
@@ -177,61 +176,78 @@ resume_col = db["parsed_resumes"]
 
 @app.post("/api/matchCandidatesLocationBased")
 async def match_candidates_location_based(body: JobRequest):
-    # Extract values safely
-    job_req = body.job_req or []
+    job_req = body.job_req 
     target_city = body.target_city
     target_state = body.target_state
     target_country = body.target_country
 
     try:
-        # 1. Date Logic
-        # Important: Use .isoformat() only if you stored dates as strings.
-        # If you stored them as proper Dates in Mongo, remove .isoformat()
+        # 1. Date Logic (Existing)
         three_months_ago = (datetime.utcnow() - timedelta(days=90)).isoformat()
 
-        # 2. Normalize keywords
+        # 2. Normalize keywords (Existing)
         keywords = []
         for kw in job_req:
-            clean = re.sub(r'[(),]', '', kw).lower().strip()
+            clean = kw.replace('(', '').replace(')', '').replace(',', '').lower().strip()
             if clean:
                 keywords.append(clean)
 
-        # 3. Build MongoDB Filter
-        mongo_filter = {}
-
-        # --- LOCATION FILTER ---
-        # Search in the 'location' field if city is provided
-        if target_city and target_city.strip():
-            mongo_filter["location"] = {"$regex": target_city.strip(), "$options": "i"}
+        # 3. Build search terms (Existing bi-grams logic)
+        search_terms = []
+        for kw in keywords:
+            words = [w for w in kw.split() if len(w) > 2 and w not in ["senior", "junior", "lead"]]
+            if len(words) > 1:
+                search_terms.extend([" ".join(words[i:i+2]) for i in range(len(words)-1)])
+            else:
+                search_terms.append(kw)
         
-        # --- DATE FILTER ---
-        mongo_filter["created_at"] = {"$gte": three_months_ago}
+        search_terms = list(set(search_terms))[:10]
 
-        # --- KEYWORD SEARCH ---
-        if keywords:
-            regex_pattern = "|".join(keywords[:10])
-            mongo_filter["$or"] = [
-                {"job_title": {"$regex": regex_pattern, "$options": "i"}},
-                {"resume_text": {"$regex": regex_pattern, "$options": "i"}},
-                {"full_name": {"$regex": regex_pattern, "$options": "i"}}
-            ]
+        # --- 4. NEW: BUILD REFINED MONGODB FILTER ---
+        mongo_filter = {"$and": []}
 
-        # 4. Execute Query
-        # Wrap in a list to avoid cursor timeout
+        # A. Skill Match (Existing logic moved to Mongo Regex)
+        if search_terms:
+            skill_pattern = "|".join([re.escape(t) for t in search_terms])
+            mongo_filter["$and"].append({
+                "$or": [
+                    {"job_title": {"$regex": skill_pattern, "$options": "i"}},
+                    {"resume_text": {"$regex": skill_pattern, "$options": "i"}}
+                ]
+            })
+
+        # B. Location Match (New "Any Field" Logic)
+        # Collects Karachi, Sindh, Pakistan etc.
+        loc_inputs = [t.strip() for t in [target_city, target_state, target_country] if t and t.strip()]
+        
+        if loc_inputs:
+            loc_pattern = "|".join([re.escape(t) for t in loc_inputs])
+            mongo_filter["$and"].append({
+                "$or": [
+                    {"location": {"$regex": loc_pattern, "$options": "i"}},
+                    {"city": {"$regex": loc_pattern, "$options": "i"}},
+                    {"state": {"$regex": loc_pattern, "$options": "i"}},
+                    {"country": {"$regex": loc_pattern, "$options": "i"}}
+                ]
+            })
+
+        # C. Date Filter (Existing logic)
+        mongo_filter["$and"].append({"created_at": {"$gte": three_months_ago}})
+
+        # 5. Execute Query (Swapped Supabase for Mongo)
         cursor = resume_col.find(mongo_filter).sort("created_at", -1).limit(100)
-        matches = await cursor.to_list(length=100)
+        all_matches = await cursor.to_list(length=100)
 
-        # 5. Process Results with Null-Safety
+        # 6. Optional domain filter (Existing TDM logic)
         tdm_keywords = ["masking", "synthetic", "subsetting", "tdm", "provisioning", "etl", "qa automation"]
         final_list = []
 
-        for cand in matches:
-            # Safety: Use empty strings if fields are missing to avoid NoneType errors
+        for cand in all_matches:
+            # Safety: Get fields as strings
             j_title = cand.get('job_title') or ""
             r_text = cand.get('resume_text') or ""
             combined_text = f"{j_title} {r_text}".lower()
 
-            # TDM Logic
             if any("test data" in kw for kw in keywords):
                 if not any(k in combined_text for k in tdm_keywords):
                     continue
@@ -239,10 +255,8 @@ async def match_candidates_location_based(body: JobRequest):
             final_list.append({
                 "id": str(cand.get("_id")),
                 "job_title": j_title,
-                "candidate_id": str(cand.get("candidate_id")), # Convert ObjectId to string
+                "candidate_id": str(cand.get("candidate_id")),
                 "resume_url": cand.get("resume_url"),
-                "location": cand.get("location"),
-                "full_name": cand.get("full_name"),
                 "resume_summary": r_text[:3000]
             })
 
@@ -252,9 +266,10 @@ async def match_candidates_location_based(body: JobRequest):
         }
 
     except Exception as e:
-        # This will now return the ACTUAL error to n8n instead of a generic 500
-        print(f"CRITICAL ERROR: {str(e)}")
+        print(f"Error: {e}")
         return {"error": str(e), "total": 0, "candidates": []}
+    
+
 # NEW: Fetch Candidates by Array of IDs
 @app.get("/api/fetch-by-ids")
 async def fetch_by_ids(ids: str = Query(...)):
