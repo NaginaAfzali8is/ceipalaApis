@@ -5,5 +5,7 @@ dependencies = [
     "fastapi",
     "supabase",
     "python-dotenv",
-    "uvicorn"
+    "uvicorn",
+    "motor",
+    "dnspython"
 ]
