@@ -24,7 +24,12 @@ if not url or not key:
 
 supabase: Client = create_client(url, key)
 
-
+# Assuming your JobRequest looks like this:
+class JobRequest(BaseModel):
+    job_req: list
+    target_city: str = None
+    target_state: str = None
+    target_country: str = None
 
 @app.get("/api/match-candidates")
 async def match_candidates(job_req: str):
@@ -156,7 +161,92 @@ async def match_candidates(body: JobRequest):
 
     except Exception as e:
         return {"error": str(e), "total": 0, "candidates": []}
-    
+
+
+import re
+from datetime import datetime, timedelta
+from motor.motor_asyncio import AsyncIOMotorClient
+
+# MongoDB Setup
+MONGO_URI = os.getenv("MONGO_URI") # Update if using Atlas
+client = AsyncIOMotorClient(MONGO_URI)
+db = client["recruitment_db"]
+resume_col = db["parsed_resumes"]
+
+@app.post("/api/matchCandidatesLocationBased")
+async def match_candidates_location_based(body: JobRequest):
+    job_req = body.job_req 
+    target_city = body.target_city
+    target_state = body.target_state
+    target_country = body.target_country
+
+    try:
+        three_months_ago = datetime.utcnow() - timedelta(days=90)
+
+        # 1. Prepare search keywords
+        keywords = []
+        for kw in job_req:
+            clean = re.sub(r'[(),]', '', kw).lower().strip()
+            if clean:
+                keywords.append(clean)
+
+        # 2. Build the MongoDB Filter
+        mongo_filter = {}
+
+        # --- LOCATION FILTERS (Direct Fields) ---
+        # We use regex for a 'contains' search similar to ILIKE
+        if target_city:
+            mongo_filter["location"] = {"$regex": target_city, "$options": "i"}
+        
+        # --- DATE FILTER ---
+        mongo_filter["created_at"] = {"$gte": three_months_ago.isoformat()}
+
+        # --- KEYWORD SEARCH (Direct Fields) ---
+        if keywords:
+            # Combining keywords into a regex pattern: "java|python|backend"
+            regex_pattern = "|".join(keywords[:10])
+            
+            mongo_filter["$or"] = [
+                {"job_title": {"$regex": regex_pattern, "$options": "i"}},
+                {"resume_text": {"$regex": regex_pattern, "$options": "i"}},
+                {"full_name": {"$regex": regex_pattern, "$options": "i"}}
+            ]
+
+        # 3. Execute Query
+        cursor = resume_col.find(mongo_filter).sort("created_at", -1).limit(100)
+        matches = await cursor.to_list(length=100)
+
+        # 4. TDM Keyword Logic & Formatting
+        tdm_keywords = ["masking", "synthetic", "subsetting", "tdm", "provisioning", "etl", "qa automation"]
+        final_list = []
+
+        for cand in matches:
+            # Extract text for TDM check
+            combined_text = f"{cand.get('job_title', '')} {cand.get('resume_text', '')}".lower()
+
+            if any("test data" in kw for kw in keywords):
+                if not any(k in combined_text for k in tdm_keywords):
+                    continue
+
+            final_list.append({
+                "id": str(cand.get("_id")),
+                "job_title": cand.get("job_title"),
+                "candidate_id": str(cand.get("candidate_id")),
+                "resume_url": cand.get("resume_url"),
+                "location": cand.get("location"),
+                "full_name": cand.get("full_name"),
+                # Summary for preview
+                "resume_summary": cand.get("resume_text", "")[:3000]
+            })
+
+        return {
+            "total": len(final_list),
+            "candidates": final_list
+        }
+
+    except Exception as e:
+        return {"error": str(e), "total": 0, "candidates": []}
+
 # NEW: Fetch Candidates by Array of IDs
 @app.get("/api/fetch-by-ids")
 async def fetch_by_ids(ids: str = Query(...)):
