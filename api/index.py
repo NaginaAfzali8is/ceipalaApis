@@ -176,23 +176,24 @@ resume_col = db["parsed_resumes"]
 
 @app.post("/api/matchCandidatesLocationBased")
 async def match_candidates_location_based(body: JobRequest):
-    job_req = body.job_req 
+    # 0. Extract raw values from Body
+    job_req = body.job_req or []
     target_city = body.target_city
     target_state = body.target_state
     target_country = body.target_country
 
     try:
-        # 1. Date Logic (Existing)
+        # 1. Date Logic (Matches your existing 90-day flow)
         three_months_ago = (datetime.utcnow() - timedelta(days=90)).isoformat()
 
-        # 2. Normalize keywords (Existing)
+        # 2. Normalize keywords (Matches your existing logic)
         keywords = []
         for kw in job_req:
             clean = kw.replace('(', '').replace(')', '').replace(',', '').lower().strip()
             if clean:
                 keywords.append(clean)
 
-        # 3. Build search terms (Existing bi-grams logic)
+        # 3. Build search terms: bi-grams + original (Matches your existing logic)
         search_terms = []
         for kw in keywords:
             words = [w for w in kw.split() if len(w) > 2 and w not in ["senior", "junior", "lead"]]
@@ -200,41 +201,43 @@ async def match_candidates_location_based(body: JobRequest):
                 search_terms.extend([" ".join(words[i:i+2]) for i in range(len(words)-1)])
             else:
                 search_terms.append(kw)
-        
+
+        # Remove duplicates and cap to 10 for performance
         search_terms = list(set(search_terms))[:10]
 
-        # --- 4. NEW: BUILD REFINED MONGODB FILTER ---
+        # --- 4. BUILD THE MONGODB FILTER ($and ensures Skills AND Location match) ---
         mongo_filter = {"$and": []}
 
-        # A. Skill Match (Existing logic moved to Mongo Regex)
+        # A. Keyword/Skill Match (Regex replaces Supabase .ilike)
         if search_terms:
-            skill_pattern = "|".join([re.escape(t) for t in search_terms])
+            skill_regex = "|".join([re.escape(term) for term in search_terms])
             mongo_filter["$and"].append({
                 "$or": [
-                    {"job_title": {"$regex": skill_pattern, "$options": "i"}},
-                    {"resume_text": {"$regex": skill_pattern, "$options": "i"}}
+                    {"job_title": {"$regex": skill_regex, "$options": "i"}},
+                    {"resume_text": {"$regex": skill_regex, "$options": "i"}}
                 ]
             })
 
-        # B. Location Match (New "Any Field" Logic)
-        # Collects Karachi, Sindh, Pakistan etc.
-        loc_inputs = [t.strip() for t in [target_city, target_state, target_country] if t and t.strip()]
+        # B. NEW: Location Match Logic (Must match if location is provided)
+        # Filters out "Not specified" or empty strings from n8n
+        loc_inputs = [t.strip() for t in [target_city, target_state, target_country] 
+                      if t and t.strip() and t.lower() != "not specified"]
         
         if loc_inputs:
-            loc_pattern = "|".join([re.escape(t) for t in loc_inputs])
+            loc_regex = "|".join([re.escape(t) for t in loc_inputs])
             mongo_filter["$and"].append({
                 "$or": [
-                    {"location": {"$regex": loc_pattern, "$options": "i"}},
-                    {"city": {"$regex": loc_pattern, "$options": "i"}},
-                    {"state": {"$regex": loc_pattern, "$options": "i"}},
-                    {"country": {"$regex": loc_pattern, "$options": "i"}}
+                    {"location": {"$regex": loc_regex, "$options": "i"}},
+                    {"city": {"$regex": loc_regex, "$options": "i"}},
+                    {"state": {"$regex": loc_regex, "$options": "i"}},
+                    {"country": {"$regex": loc_regex, "$options": "i"}}
                 ]
             })
 
-        # C. Date Filter (Existing logic)
+        # C. Date Filter
         mongo_filter["$and"].append({"created_at": {"$gte": three_months_ago}})
 
-        # 5. Execute Query (Swapped Supabase for Mongo)
+        # 5. Execute MongoDB Query (Async)
         cursor = resume_col.find(mongo_filter).sort("created_at", -1).limit(100)
         all_matches = await cursor.to_list(length=100)
 
@@ -243,19 +246,21 @@ async def match_candidates_location_based(body: JobRequest):
         final_list = []
 
         for cand in all_matches:
-            # Safety: Get fields as strings
-            j_title = cand.get('job_title') or ""
+            # Safety checks for None values in fields
+            j_title = cand.get('job_title') or "No Title"
             r_text = cand.get('resume_text') or ""
             combined_text = f"{j_title} {r_text}".lower()
 
+            # TDM Skill Check
             if any("test data" in kw for kw in keywords):
                 if not any(k in combined_text for k in tdm_keywords):
                     continue
 
+            # Map the response exactly as your n8n expects it
             final_list.append({
-                "id": str(cand.get("_id")),
+                "id": str(cand.get("_id")), # Convert ObjectId to String
                 "job_title": j_title,
-                "candidate_id": str(cand.get("candidate_id")),
+                "candidate_id": str(cand.get("candidate_id")), # Convert ObjectId to String
                 "resume_url": cand.get("resume_url"),
                 "resume_summary": r_text[:3000]
             })
@@ -266,9 +271,9 @@ async def match_candidates_location_based(body: JobRequest):
         }
 
     except Exception as e:
-        print(f"Error: {e}")
+        # Crucial for debugging: This will return the actual error message to n8n
+        print(f"DEBUG ERROR: {str(e)}")
         return {"error": str(e), "total": 0, "candidates": []}
-    
 
 # NEW: Fetch Candidates by Array of IDs
 @app.get("/api/fetch-by-ids")
