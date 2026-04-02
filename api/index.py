@@ -63,7 +63,7 @@ async def match_candidates(job_req: str):
             ",".join(filter_parts)
         ).gte(
             "ceipal_applicant_details.created_at", three_months_ago
-        ).limit(200).execute()
+        ).limit(150).execute()
         
         all_matches = response.data
         tdm_keywords = ["masking", "synthetic", "subsetting", "tdm", "provisioning", "etl", "qa automation"]
