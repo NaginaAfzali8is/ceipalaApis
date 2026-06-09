@@ -1,6 +1,6 @@
 import os
 from fastapi import FastAPI, HTTPException, Query
-from typing import List
+from typing import List, Optional
 from supabase import create_client, Client
 from dotenv import load_dotenv
 from datetime import datetime, timedelta        
@@ -40,6 +40,47 @@ class JobRequest(BaseModel):
     target_city: str = None
     target_state: str = None
     target_country: str = None
+
+    # ahad test: optional request flags for Postman/n8n.
+    # Backend will now return resume date fields in candidate response.
+    include_resume_date: bool = False
+    include_profile_dates: bool = False
+    return_fields: Optional[list] = None
+
+# ahad test: date helpers for n8n 3-month resume freshness logic
+def clean_date(value):
+    """
+    Convert Mongo/Python date values into JSON-safe strings.
+    Keeps existing string dates as-is.
+    """
+    if not value:
+        return None
+
+    if isinstance(value, datetime):
+        return value.isoformat()
+
+    return str(value)
+
+
+def get_resume_date(cand):
+    """
+    Return the best available resume/profile update date from MongoDB candidate document.
+    Priority: real resume update/upload fields first, then profile/update fields, then created_at fallback.
+    """
+    return clean_date(
+        cand.get("resume_updated_at")
+        or cand.get("resume_update_date")
+        or cand.get("resume_last_updated")
+        or cand.get("resume_uploaded_at")
+        or cand.get("cv_updated_at")
+        or cand.get("profile_updated_at")
+        or cand.get("updated_at")
+        or cand.get("modified_at")
+        or cand.get("last_updated")
+        or cand.get("date_updated")
+        or cand.get("created_at")
+    )
+
 
 @app.get("/api/match-candidates")
 async def match_candidates(job_req: str):
@@ -235,7 +276,10 @@ async def match_candidates_location_based(body: JobRequest):
             })
 
         # C. Date Filter
-        mongo_filter["$and"].append({"created_at": {"$gte": three_months_ago}})
+        # ahad test: raw DB-level 90-day filter commented out.
+        # Reason: n8n now runs final 3-month logic after GPT-selected candidates are logged.
+        # Do not filter old candidates here; return date to n8n and let n8n decide repost/email.
+        # mongo_filter["$and"].append({"created_at": {"$gte": three_months_ago}})
 
         # 5. Execute Async Query
         cursor = resume_col.find(mongo_filter).sort("created_at", -1).limit(100)
@@ -254,12 +298,26 @@ async def match_candidates_location_based(body: JobRequest):
                 if not any(k in combined_text for k in tdm_keywords):
                     continue
 
+            # ahad test: expose resume/profile date fields for n8n 3-month logic
+            resume_updated_at = get_resume_date(cand)
+
             final_list.append({
                 "id": str(cand.get("_id")), 
                 "job_title": j_title,
                 "candidate_id": str(cand.get("candidate_id")),
                 "resume_url": cand.get("resume_url"),
-                "resume_summary": r_text[:3000]
+                "resume_summary": r_text[:3000],
+
+                # ahad test: main date field used by n8n Sheet8 -> Resume Updated Date
+                "resume_updated_at": resume_updated_at,
+
+                # ahad test: debug fields to verify which dates exist in MongoDB/Postman
+                "resume_update_date": clean_date(cand.get("resume_update_date")),
+                "resume_uploaded_at": clean_date(cand.get("resume_uploaded_at")),
+                "profile_updated_at": clean_date(cand.get("profile_updated_at")),
+                "updated_at": clean_date(cand.get("updated_at")),
+                "modified_at": clean_date(cand.get("modified_at")),
+                "created_at": clean_date(cand.get("created_at"))
             })
 
         return {
