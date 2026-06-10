@@ -50,36 +50,90 @@ class JobRequest(BaseModel):
 # ahad test: date helpers for n8n 3-month resume freshness logic
 def clean_date(value):
     """
-    Convert Mongo/Python date values into JSON-safe strings.
-    Keeps existing string dates as-is.
+    Convert Mongo/Python date values into JSON-safe DATE strings only.
+
+    Examples:
+    "2026-03-03 00:29:32+00"       -> "2026-03-03"
+    "2026-03-03T00:29:32+00:00"    -> "2026-03-03"
+
+    If value is not a date-like string, it returns the original string.
     """
     if not value:
         return None
 
     if isinstance(value, datetime):
-        return value.isoformat()
+        return value.date().isoformat()
 
-    return str(value)
+    value = str(value).strip()
+
+    # Extract only YYYY-MM-DD from timestamp/date strings.
+    match = re.match(r"^\d{4}-\d{2}-\d{2}", value)
+    if match:
+        return match.group(0)
+
+    return value
+
+
+def get_candidate_field(cand, field_name):
+    """
+    Safely read a field from the candidate document.
+
+    Priority:
+    1. Top-level MongoDB field, e.g. cand["api_modified_at"]
+    2. Nested data field, e.g. cand["data"]["api_modified_at"]
+
+    This keeps the API safe if some records store dates directly
+    and some records store them inside a data object.
+    """
+    if not isinstance(cand, dict):
+        return None
+
+    value = cand.get(field_name)
+    if value:
+        return value
+
+    data = cand.get("data")
+    if isinstance(data, dict):
+        return data.get(field_name)
+
+    return None
 
 
 def get_resume_date(cand):
     """
     Return the best available resume/profile update date from MongoDB candidate document.
-    Priority: real resume update/upload fields first, then profile/update fields, then created_at fallback.
+
+    Main requirement:
+    - Use api_modified_at first.
+    - If api_modified_at key is missing or value is empty, fall back to the old/current date priority.
+    - Return date only, not timestamp.
+
+    Returns:
+    (date_value, source_field_name)
     """
-    return clean_date(
-        cand.get("resume_updated_at")
-        or cand.get("resume_update_date")
-        or cand.get("resume_last_updated")
-        or cand.get("resume_uploaded_at")
-        or cand.get("cv_updated_at")
-        or cand.get("profile_updated_at")
-        or cand.get("updated_at")
-        or cand.get("modified_at")
-        or cand.get("last_updated")
-        or cand.get("date_updated")
-        or cand.get("created_at")
-    )
+    date_fields = [
+        "api_modified_at",      # main required field
+
+        # Old/current fallback priority starts here
+        "resume_updated_at",
+        "resume_update_date",
+        "resume_last_updated",
+        "resume_uploaded_at",
+        "cv_updated_at",
+        "profile_updated_at",
+        "updated_at",
+        "modified_at",
+        "last_updated",
+        "date_updated",
+        "created_at",
+    ]
+
+    for field_name in date_fields:
+        value = get_candidate_field(cand, field_name)
+        if value:
+            return clean_date(value), field_name
+
+    return None, None
 
 
 @app.get("/api/match-candidates")
@@ -299,7 +353,8 @@ async def match_candidates_location_based(body: JobRequest):
                     continue
 
             # ahad test: expose resume/profile date fields for n8n 3-month logic
-            resume_updated_at = get_resume_date(cand)
+            # api_modified_at is now the main date. If missing/empty, old fallback dates are used.
+            resume_updated_at, resume_date_source = get_resume_date(cand)
 
             final_list.append({
                 "id": str(cand.get("_id")), 
@@ -309,15 +364,22 @@ async def match_candidates_location_based(body: JobRequest):
                 "resume_summary": r_text[:3000],
 
                 # ahad test: main date field used by n8n Sheet8 -> Resume Updated Date
+                # Priority: api_modified_at first; if missing/empty, old fallback date is used.
                 "resume_updated_at": resume_updated_at,
 
+                # ahad test: shows which DB field was used for resume_updated_at
+                "resume_date_source": resume_date_source,
+
                 # ahad test: debug fields to verify which dates exist in MongoDB/Postman
-                "resume_update_date": clean_date(cand.get("resume_update_date")),
-                "resume_uploaded_at": clean_date(cand.get("resume_uploaded_at")),
-                "profile_updated_at": clean_date(cand.get("profile_updated_at")),
-                "updated_at": clean_date(cand.get("updated_at")),
-                "modified_at": clean_date(cand.get("modified_at")),
-                "created_at": clean_date(cand.get("created_at"))
+                # These are date-only now, not full timestamps.
+                "api_modified_at": clean_date(get_candidate_field(cand, "api_modified_at")),
+                "api_created_at": clean_date(get_candidate_field(cand, "api_created_at")),
+                "resume_update_date": clean_date(get_candidate_field(cand, "resume_update_date")),
+                "resume_uploaded_at": clean_date(get_candidate_field(cand, "resume_uploaded_at")),
+                "profile_updated_at": clean_date(get_candidate_field(cand, "profile_updated_at")),
+                "updated_at": clean_date(get_candidate_field(cand, "updated_at")),
+                "modified_at": clean_date(get_candidate_field(cand, "modified_at")),
+                "created_at": clean_date(get_candidate_field(cand, "created_at"))
             })
 
         return {
