@@ -50,90 +50,59 @@ class JobRequest(BaseModel):
 # ahad test: date helpers for n8n 3-month resume freshness logic
 def clean_date(value):
     """
-    Convert Mongo/Python date values into JSON-safe DATE strings only.
-
-    Examples:
-    "2026-03-03 00:29:32+00"       -> "2026-03-03"
-    "2026-03-03T00:29:32+00:00"    -> "2026-03-03"
-
-    If value is not a date-like string, it returns the original string.
+    Convert Mongo/Python date values into JSON-safe strings.
+    Keeps existing string dates as-is.
     """
     if not value:
         return None
 
     if isinstance(value, datetime):
-        return value.date().isoformat()
+        return value.isoformat()
 
-    value = str(value).strip()
-
-    # Extract only YYYY-MM-DD from timestamp/date strings.
-    match = re.match(r"^\d{4}-\d{2}-\d{2}", value)
-    if match:
-        return match.group(0)
-
-    return value
+    return str(value)
 
 
-def get_candidate_field(cand, field_name):
+def get_candidate_payload(cand):
     """
-    Safely read a field from the candidate document.
-
-    Priority:
-    1. Top-level MongoDB field, e.g. cand["api_modified_at"]
-    2. Nested data field, e.g. cand["data"]["api_modified_at"]
-
-    This keeps the API safe if some records store dates directly
-    and some records store them inside a data object.
+    Support both Mongo formats:
+    1. legacy flat fields at document root
+    2. newer nested fields inside `data`
     """
-    if not isinstance(cand, dict):
+    payload = cand.get("data")
+    return payload if isinstance(payload, dict) else cand
+
+
+def get_candidate_field(cand, field, default=None):
+    payload = get_candidate_payload(cand)
+    return payload.get(field, cand.get(field, default))
+
+
+def stringify_id(value):
+    if value is None:
         return None
-
-    value = cand.get(field_name)
-    if value:
-        return value
-
-    data = cand.get("data")
-    if isinstance(data, dict):
-        return data.get(field_name)
-
-    return None
+    if isinstance(value, ObjectId):
+        return str(value)
+    return str(value)
 
 
 def get_resume_date(cand):
     """
     Return the best available resume/profile update date from MongoDB candidate document.
-
-    Main requirement:
-    - Use api_modified_at first.
-    - If api_modified_at key is missing or value is empty, fall back to the old/current date priority.
-    - Return date only, not timestamp.
-
-    Returns:
-    (date_value, source_field_name)
+    Priority: real resume update/upload fields first, then profile/update fields, then created_at fallback.
     """
-    date_fields = [
-        "api_modified_at",      # main required field
-
-        # Old/current fallback priority starts here
-        "resume_updated_at",
-        "resume_update_date",
-        "resume_last_updated",
-        "resume_uploaded_at",
-        "cv_updated_at",
-        "profile_updated_at",
-        "updated_at",
-        "modified_at",
-        "last_updated",
-        "date_updated",
-        "created_at",
-    ]
-
-    for field_name in date_fields:
-        value = get_candidate_field(cand, field_name)
-        if value:
-            return clean_date(value), field_name
-
-    return None, None
+    return clean_date(
+        get_candidate_field(cand, "resume_updated_at")
+        or get_candidate_field(cand, "resume_update_date")
+        or get_candidate_field(cand, "resume_last_updated")
+        or get_candidate_field(cand, "resume_uploaded_at")
+        or get_candidate_field(cand, "cv_updated_at")
+        or get_candidate_field(cand, "profile_updated_at")
+        or get_candidate_field(cand, "updated_at")
+        or get_candidate_field(cand, "modified_at")
+        or get_candidate_field(cand, "last_updated")
+        or get_candidate_field(cand, "date_updated")
+        or cand.get("created_at")
+    )
 
 
 @app.get("/api/match-candidates")
@@ -309,7 +278,9 @@ async def match_candidates_location_based(body: JobRequest):
             mongo_filter["$and"].append({
                 "$or": [
                     {"job_title": {"$regex": skill_pattern, "$options": "i"}},
-                    {"resume_text": {"$regex": skill_pattern, "$options": "i"}}
+                    {"resume_text": {"$regex": skill_pattern, "$options": "i"}},
+                    {"data.job_title": {"$regex": skill_pattern, "$options": "i"}},
+                    {"data.resume_text": {"$regex": skill_pattern, "$options": "i"}}
                 ]
             })
 
@@ -325,7 +296,12 @@ async def match_candidates_location_based(body: JobRequest):
                     {"city": {"$regex": loc_pattern, "$options": "i"}},
                     {"state": {"$regex": loc_pattern, "$options": "i"}},
                     {"country": {"$regex": loc_pattern, "$options": "i"}},
-                    {"resume_text": {"$regex": loc_pattern, "$options": "i"}}
+                    {"resume_text": {"$regex": loc_pattern, "$options": "i"}},
+                    {"data.location": {"$regex": loc_pattern, "$options": "i"}},
+                    {"data.city": {"$regex": loc_pattern, "$options": "i"}},
+                    {"data.state": {"$regex": loc_pattern, "$options": "i"}},
+                    {"data.country": {"$regex": loc_pattern, "$options": "i"}},
+                    {"data.resume_text": {"$regex": loc_pattern, "$options": "i"}}
                 ]
             })
 
@@ -344,8 +320,8 @@ async def match_candidates_location_based(body: JobRequest):
         final_list = []
 
         for cand in all_matches:
-            j_title = cand.get('job_title') or ""
-            r_text = cand.get('resume_text') or ""
+            j_title = get_candidate_field(cand, "job_title", "") or ""
+            r_text = get_candidate_field(cand, "resume_text", "") or ""
             combined_text = f"{j_title} {r_text}".lower()
 
             if any("test data" in kw for kw in keywords):
@@ -353,33 +329,25 @@ async def match_candidates_location_based(body: JobRequest):
                     continue
 
             # ahad test: expose resume/profile date fields for n8n 3-month logic
-            # api_modified_at is now the main date. If missing/empty, old fallback dates are used.
-            resume_updated_at, resume_date_source = get_resume_date(cand)
+            resume_updated_at = get_resume_date(cand)
 
             final_list.append({
                 "id": str(cand.get("_id")), 
                 "job_title": j_title,
-                "candidate_id": str(cand.get("candidate_id")),
-                "resume_url": cand.get("resume_url"),
+                "candidate_id": stringify_id(cand.get("candidate_id")),
+                "resume_url": get_candidate_field(cand, "resume_url"),
                 "resume_summary": r_text[:3000],
 
                 # ahad test: main date field used by n8n Sheet8 -> Resume Updated Date
-                # Priority: api_modified_at first; if missing/empty, old fallback date is used.
                 "resume_updated_at": resume_updated_at,
 
-                # ahad test: shows which DB field was used for resume_updated_at
-                "resume_date_source": resume_date_source,
-
                 # ahad test: debug fields to verify which dates exist in MongoDB/Postman
-                # These are date-only now, not full timestamps.
-                "api_modified_at": clean_date(get_candidate_field(cand, "api_modified_at")),
-                "api_created_at": clean_date(get_candidate_field(cand, "api_created_at")),
                 "resume_update_date": clean_date(get_candidate_field(cand, "resume_update_date")),
                 "resume_uploaded_at": clean_date(get_candidate_field(cand, "resume_uploaded_at")),
                 "profile_updated_at": clean_date(get_candidate_field(cand, "profile_updated_at")),
                 "updated_at": clean_date(get_candidate_field(cand, "updated_at")),
                 "modified_at": clean_date(get_candidate_field(cand, "modified_at")),
-                "created_at": clean_date(get_candidate_field(cand, "created_at"))
+                "created_at": clean_date(cand.get("created_at"))
             })
 
         return {
